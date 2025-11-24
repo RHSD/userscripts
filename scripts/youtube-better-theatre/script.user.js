@@ -4,7 +4,7 @@
 // @version      2.0
 // @description  Auto-hides YouTube top bar with hover reveal and enlarges the media player to fill the entire screen when in theatre mode.
 // @author       RHSD
-// @match        https://www.youtube.com/*
+// @match        https://www.youtube.com/watch*
 // @icon         https://www.google.com/s2/favicons?domain=youtube.com
 // @grant        none
 // @run-at       document-start
