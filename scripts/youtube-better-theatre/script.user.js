@@ -83,6 +83,11 @@
 
     // Setup auto-hide top bar
     function setupAutoHide() {
+        // Don't autohide on shorts etc.
+        if (!window.location.pathname.startsWith('/watch')) {
+            return;
+        }
+
         const masthead = document.querySelector("#masthead-container");
         if (!masthead) {
             requestAnimationFrame(setupAutoHide);
@@ -113,6 +118,16 @@
             wrapper.classList.remove("visible");
         });
     }
+
+    // Listen for URL changes
+    let lastUrl = location.href;
+    new MutationObserver(() => {
+        const url = location.href;
+        if (url !== lastUrl) {
+            lastUrl = url;
+            setupAutoHide();
+        }
+    }).observe(document, {subtree: true, childList: true});
 
     // Ensure theatre CSS persists since youtube is a single page app
     setInterval(() => {
