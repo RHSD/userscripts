@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Scroll PiP
 // @namespace    https://github.com/RHSD/userscripts
-// @version      3.1
+// @version      4.0
 // @description  YouTube Picture-in-Picture mode when scrolling past the video player
 // @author       RHSD
 // @match        https://www.youtube.com/*
@@ -13,29 +13,62 @@
 (function() {
     'use strict';
 
-    const STORAGE_KEY = 'yt-pip-state';
-    const MIN_WIDTH = 200;
-    const ASPECT_RATIO = 16 / 9;
-    const SCROLL_THRESHOLD = 50;
+    // Constants
+    const CONFIG = {
+        storageKey: 'yt-pip-state',
+        minWidth: 200,
+        aspectRatio: 16 / 9,
+        scrollEnterThreshold: 100,
+        scrollExitThreshold: 50,
+        transitionDelay: 200
+    };
 
     const STYLES = `
+        /* PiP container */
         ytd-watch-flexy[pip-mode] #player-container {
-            position: fixed;
-            z-index: 9999;
+            position: fixed !important;
+            z-index: 9999 !important;
             box-shadow: 0 8px 32px rgba(0,0,0,0.6);
             border-radius: 8px;
-            overflow: visible;
+            overflow: visible !important;
             background: #000;
         }
-        ytd-watch-flexy[pip-mode] #player-container video {
+
+        /* Force inner elements to fill container */
+        ytd-watch-flexy[pip-mode] #player-container #movie_player,
+        ytd-watch-flexy[pip-mode] #player-container .html5-video-container {
+            width: 100% !important;
+            height: 100% !important;
+        }
+
+        ytd-watch-flexy[pip-mode] #player-container video.html5-main-video {
+            width: 100% !important;
+            height: 100% !important;
+            left: 0 !important;
+            top: 0 !important;
             object-fit: contain;
             border-radius: 8px;
         }
-        ytd-watch-flexy[pip-mode][pip-minimized] #player-container {
-            display: none;
+
+        /* Force player UI to resize */
+        ytd-watch-flexy[pip-mode] #player-container .ytp-chrome-bottom {
+            width: 100% !important;
+            left: 0 !important;
         }
 
-        /* Placeholder to prevent layout shift */
+        /* Collapse original player space */
+        ytd-watch-flexy[pip-mode] #player-container-outer,
+        ytd-watch-flexy[pip-mode] #player-container-inner {
+            min-height: 0 !important;
+            height: 0 !important;
+        }
+
+        /* Minimized state */
+        ytd-watch-flexy[pip-mode][pip-minimized] #player-container {
+            display: none !important;
+        }
+
+        /* Placeholder */
         #pip-placeholder {
             display: none;
         }
@@ -43,9 +76,11 @@
             display: block;
         }
 
-        /* Controls */
-        .pip-control-btn {
+        /* Minimize button */
+        #pip-minimize-btn {
             position: absolute;
+            top: 8px;
+            left: 8px;
             width: 28px;
             height: 28px;
             background: rgba(0,0,0,0.7);
@@ -59,14 +94,14 @@
             opacity: 0;
             transition: opacity 0.2s, background 0.2s;
         }
-        .pip-control-btn:hover {
-            background: rgba(255,255,255,0.3);
-        }
-        ytd-watch-flexy[pip-mode] #player-container:hover .pip-control-btn {
+        ytd-watch-flexy[pip-mode] #player-container:hover #pip-minimize-btn {
             opacity: 1;
         }
-        #pip-minimize-btn { top: 8px; left: 8px; }
+        #pip-minimize-btn:hover {
+            background: rgba(255,255,255,0.3);
+        }
 
+        /* Restore button */
         #pip-restore-btn {
             position: fixed;
             width: 28px;
@@ -99,7 +134,9 @@
         /* Drag area */
         #pip-drag-area {
             position: absolute;
-            top: 0; left: 0; right: 0;
+            top: 0;
+            left: 0;
+            right: 0;
             height: 40px;
             cursor: move;
             z-index: 10000;
@@ -107,77 +144,73 @@
     `;
 
     // State
-    let isActive = false;
-    let isMinimized = false;
-    let pipState = loadState();
+    let state = {
+        active: false,
+        minimized: false,
+        transitioning: false,
+        originalPlayerBottom: null,
+        pip: loadPipState()
+    };
 
-    function loadState() {
+    // DOM helpers
+    const $ = sel => document.querySelector(sel);
+    const create = (tag, props) => Object.assign(document.createElement(tag), props);
+    const clamp = (val, min, max) => Math.max(min, Math.min(max, val));
+
+    // State persistence
+    function loadPipState() {
         try {
-            return JSON.parse(localStorage.getItem(STORAGE_KEY)) || getDefaultState();
+            return JSON.parse(localStorage.getItem(CONFIG.storageKey)) || defaultPipState();
         } catch {
-            return getDefaultState();
+            return defaultPipState();
         }
     }
 
-    function getDefaultState() {
+    function defaultPipState() {
         return { width: 400, height: 225, left: null, top: null };
     }
 
-    function saveState() {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(pipState));
+    function savePipState() {
+        localStorage.setItem(CONFIG.storageKey, JSON.stringify(state.pip));
     }
 
-    // DOM helpers
-    function $(sel) { return document.querySelector(sel); }
-    function create(tag, props = {}) {
-        const el = document.createElement(tag);
-        Object.assign(el, props);
-        return el;
-    }
-
-    function clamp(val, min, max) {
-        return Math.max(min, Math.min(max, val));
-    }
-
-    // Drag utility - calls onMove during drag, saves state on end
+    // Drag/resize handler factory
     function makeDraggable(el, onMove, onEnd) {
-        el.addEventListener('mousedown', (e) => {
+        el.addEventListener('mousedown', e => {
             e.preventDefault();
             e.stopPropagation();
 
             const startX = e.clientX;
             const startY = e.clientY;
-            const startState = { ...pipState };
+            const startPip = { ...state.pip };
 
-            function move(e) {
-                onMove(e.clientX - startX, e.clientY - startY, startState);
-            }
-
-            function up() {
+            const move = e => onMove(e.clientX - startX, e.clientY - startY, startPip);
+            const up = () => {
                 document.removeEventListener('mousemove', move);
                 document.removeEventListener('mouseup', up);
-                saveState();
+                savePipState();
                 onEnd?.();
-            }
+            };
 
             document.addEventListener('mousemove', move);
             document.addEventListener('mouseup', up);
         });
     }
 
-    function applyPipPosition() {
+    // PiP positioning
+    function applyPosition() {
         const container = $('#player-container');
         if (!container) return;
 
-        // Clamp to viewport
-        pipState.left = clamp(pipState.left, 0, window.innerWidth - pipState.width);
-        pipState.top = clamp(pipState.top, 0, window.innerHeight - pipState.height);
+        const pip = state.pip;
+        pip.left = clamp(pip.left, 0, window.innerWidth - pip.width);
+        pip.top = clamp(pip.top, 0, window.innerHeight - pip.height);
 
         Object.assign(container.style, {
-            width: pipState.width + 'px',
-            height: pipState.height + 'px',
-            left: pipState.left + 'px',
-            top: pipState.top + 'px'
+            width: `${pip.width}px`,
+            height: `${pip.height}px`,
+            left: `${pip.left}px`,
+            top: `${pip.top}px`
         });
     }
 
@@ -185,30 +218,23 @@
         window.dispatchEvent(new Event('resize'));
     }
 
-    // Setup PiP UI elements (called once)
-    function setupPipUI() {
+    // UI Setup
+    function setupUI() {
         const container = $('#player-container');
         if (!container || container.dataset.pipSetup) return;
         container.dataset.pipSetup = 'true';
 
         // Minimize button
-        const minBtn = create('button', {
-            id: 'pip-minimize-btn',
-            className: 'pip-control-btn',
-            textContent: '−',
-            onclick: (e) => {
-                e.stopPropagation();
-                minimize();
-            }
-        });
+        const minBtn = create('button', { id: 'pip-minimize-btn', textContent: '−' });
+        minBtn.onclick = e => { e.stopPropagation(); minimize(); };
         container.appendChild(minBtn);
 
         // Drag area
         const dragArea = create('div', { id: 'pip-drag-area' });
         makeDraggable(dragArea, (dx, dy, start) => {
-            pipState.left = start.left + dx;
-            pipState.top = start.top + dy;
-            applyPipPosition();
+            state.pip.left = start.left + dx;
+            state.pip.top = start.top + dy;
+            applyPosition();
         }, triggerResize);
         container.appendChild(dragArea);
 
@@ -217,40 +243,38 @@
             const handle = create('div', { className: `pip-resize-handle ${dir}` });
             makeDraggable(handle, (dx, dy, start) => {
                 const widthDelta = dir.includes('e') ? dx : -dx;
-                const newWidth = Math.max(MIN_WIDTH, start.width + widthDelta);
-                const newHeight = newWidth / ASPECT_RATIO;
+                const newWidth = Math.max(CONFIG.minWidth, start.width + widthDelta);
+                const newHeight = newWidth / CONFIG.aspectRatio;
 
-                pipState.width = newWidth;
-                pipState.height = newHeight;
-                pipState.left = dir.includes('w') ? start.left + start.width - newWidth : start.left;
-                pipState.top = dir.includes('n') ? start.top + start.height - newHeight : start.top;
-                applyPipPosition();
+                state.pip.width = newWidth;
+                state.pip.height = newHeight;
+                state.pip.left = dir.includes('w') ? start.left + start.width - newWidth : start.left;
+                state.pip.top = dir.includes('n') ? start.top + start.height - newHeight : start.top;
+                applyPosition();
                 triggerResize();
             });
             container.appendChild(handle);
         });
 
-        // Placeholder for layout
+        // Placeholder
         if (!$('#pip-placeholder')) {
             const placeholder = create('div', { id: 'pip-placeholder' });
-            container.parentElement?.insertBefore(placeholder, container);
+            const outer = $('#player-container-outer') || container.parentElement;
+            outer?.parentElement?.insertBefore(placeholder, outer);
         }
 
-        // Restore button (in body)
+        // Restore button
         if (!$('#pip-restore-btn')) {
-            const restoreBtn = create('button', {
-                id: 'pip-restore-btn',
-                textContent: '▶'
-            });
-            setupRestoreButton(restoreBtn);
-            document.body.appendChild(restoreBtn);
+            const btn = create('button', { id: 'pip-restore-btn', textContent: '▶' });
+            setupRestoreButton(btn);
+            document.body.appendChild(btn);
         }
     }
 
     function setupRestoreButton(btn) {
         let startX, startY, startLeft, startTop, hasMoved;
 
-        btn.addEventListener('mousedown', (e) => {
+        btn.addEventListener('mousedown', e => {
             e.preventDefault();
             hasMoved = false;
             startX = e.clientX;
@@ -258,27 +282,22 @@
             startLeft = parseInt(btn.style.left) || 0;
             startTop = parseInt(btn.style.top) || 0;
 
-            function move(e) {
+            const move = e => {
                 const dx = e.clientX - startX;
                 const dy = e.clientY - startY;
-
                 if (Math.abs(dx) > 3 || Math.abs(dy) > 3) hasMoved = true;
+                btn.style.left = `${clamp(startLeft + dx, 0, window.innerWidth - 28)}px`;
+                btn.style.top = `${clamp(startTop + dy, 0, window.innerHeight - 28)}px`;
+            };
 
-                btn.style.left = clamp(startLeft + dx, 0, window.innerWidth - 28) + 'px';
-                btn.style.top = clamp(startTop + dy, 0, window.innerHeight - 28) + 'px';
-            }
-
-            function up() {
+            const up = () => {
                 document.removeEventListener('mousemove', move);
                 document.removeEventListener('mouseup', up);
-
-                // Update pip position to match button
-                pipState.left = parseInt(btn.style.left) - 8;
-                pipState.top = parseInt(btn.style.top) - 8;
-                saveState();
-
+                state.pip.left = parseInt(btn.style.left) - 8;
+                state.pip.top = parseInt(btn.style.top) - 8;
+                savePipState();
                 if (!hasMoved) restore();
-            }
+            };
 
             document.addEventListener('mousemove', move);
             document.addEventListener('mouseup', up);
@@ -286,98 +305,113 @@
     }
 
     function updatePlaceholderHeight() {
-        const container = $('#player-container');
         const placeholder = $('#pip-placeholder');
-        if (container && placeholder && !isActive) {
-            placeholder.style.height = container.offsetHeight + 'px';
+        const outer = $('#player-container-outer') || $('#player-container');
+        if (placeholder && outer && !state.active) {
+            placeholder.style.height = `${outer.offsetHeight}px`;
         }
     }
 
+    // PiP controls
     function minimize() {
-        isMinimized = true;
+        state.minimized = true;
         $('ytd-watch-flexy')?.setAttribute('pip-minimized', '');
 
-        const restoreBtn = $('#pip-restore-btn');
-        if (restoreBtn) {
-            restoreBtn.style.left = (pipState.left + 8) + 'px';
-            restoreBtn.style.top = (pipState.top + 8) + 'px';
-            restoreBtn.style.display = 'block';
+        const btn = $('#pip-restore-btn');
+        if (btn) {
+            btn.style.left = `${state.pip.left + 8}px`;
+            btn.style.top = `${state.pip.top + 8}px`;
+            btn.style.display = 'block';
         }
     }
 
     function restore() {
-        isMinimized = false;
+        state.minimized = false;
         $('ytd-watch-flexy')?.removeAttribute('pip-minimized');
         $('#pip-restore-btn').style.display = 'none';
-        applyPipPosition();
+        applyPosition();
     }
 
     function enablePip() {
-        if (isActive) return;
+        if (state.active || state.transitioning) return;
 
         const watchFlexy = $('ytd-watch-flexy');
         if (!watchFlexy || !$('#player-container')) return;
 
-        setupPipUI();
+        state.transitioning = true;
+
+        setupUI();
         updatePlaceholderHeight();
 
-        // Set default position if not set
-        if (pipState.left === null) {
-            pipState.left = window.innerWidth - pipState.width - 20;
-            pipState.top = window.innerHeight - pipState.height - 20;
+        if (state.pip.left === null) {
+            state.pip.left = window.innerWidth - state.pip.width - 20;
+            state.pip.top = window.innerHeight - state.pip.height - 20;
         }
 
-        isActive = true;
+        state.active = true;
         watchFlexy.setAttribute('pip-mode', '');
-        applyPipPosition();
-        requestAnimationFrame(triggerResize);
+        applyPosition();
+
+        requestAnimationFrame(() => {
+            triggerResize();
+            setTimeout(() => {
+                triggerResize();
+                state.transitioning = false;
+            }, CONFIG.transitionDelay);
+        });
     }
 
     function disablePip() {
-        if (!isActive) return;
+        if (!state.active || state.transitioning) return;
 
         const watchFlexy = $('ytd-watch-flexy');
         const container = $('#player-container');
 
-        isActive = false;
-        isMinimized = false;
+        state.transitioning = true;
+        state.active = false;
+        state.minimized = false;
+        state.originalPlayerBottom = null;
 
         watchFlexy?.removeAttribute('pip-mode');
         watchFlexy?.removeAttribute('pip-minimized');
         $('#pip-restore-btn')?.style.setProperty('display', 'none');
+        if (container) container.style.cssText = '';
 
-        if (container) {
-            container.style.cssText = '';
-        }
-
-        requestAnimationFrame(triggerResize);
+        requestAnimationFrame(() => {
+            triggerResize();
+            setTimeout(() => {
+                triggerResize();
+                state.transitioning = false;
+            }, CONFIG.transitionDelay);
+        });
     }
 
-    function getPlayerRect() {
-        const container = $('#player-container');
-        if (!container) return null;
-
-        const target = isActive ? $('#pip-placeholder') || container.parentElement : container;
-        return target?.getBoundingClientRect();
-    }
-
+    // Scroll handling
     function checkScroll() {
         if (!location.pathname.startsWith('/watch')) {
-            disablePip();
+            if (state.active) disablePip();
+            state.originalPlayerBottom = null;
             return;
         }
 
-        const rect = getPlayerRect();
-        if (!rect) return;
+        if (state.transitioning) return;
 
-        if (!isActive && rect.bottom < -SCROLL_THRESHOLD) {
-            enablePip();
-        } else if (isActive && rect.top > -SCROLL_THRESHOLD) {
-            disablePip();
+        if (!state.active) {
+            const container = $('#player-container');
+            if (!container) return;
+
+            const rect = container.getBoundingClientRect();
+            if (rect.bottom < -CONFIG.scrollEnterThreshold) {
+                state.originalPlayerBottom = window.scrollY + rect.bottom;
+                enablePip();
+            }
+        } else if (state.originalPlayerBottom !== null) {
+            if (window.scrollY < state.originalPlayerBottom - CONFIG.scrollExitThreshold) {
+                disablePip();
+            }
         }
     }
 
-    // Throttled scroll handler
     let scrollTicking = false;
     function onScroll() {
         if (!scrollTicking) {
@@ -389,7 +423,7 @@
         }
     }
 
-    // Init
+    // Initialize
     function init() {
         if ($('#yt-pip-styles')) return;
 
@@ -397,7 +431,10 @@
         (document.head || document.documentElement).appendChild(style);
 
         window.addEventListener('scroll', onScroll, { passive: true });
-        window.addEventListener('yt-navigate-finish', disablePip);
+        window.addEventListener('yt-navigate-finish', () => {
+            state.originalPlayerBottom = null;
+            disablePip();
+        });
     }
 
     init();
