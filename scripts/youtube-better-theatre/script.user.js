@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Better Theatre
 // @namespace    https://github.com/RHSD/userscripts
-// @version      2.0
+// @version      2.1
 // @description  Auto-hides YouTube top bar with hover reveal and enlarges the media player to fill the entire screen when in theatre mode.
 // @author       RHSD
 // @match        https://www.youtube.com/*
@@ -69,72 +69,94 @@
     }
     `;
 
-    // Inject CSS
+    // Inject CSS with deduplication
     function addStyle(styleText, id) {
         if (document.getElementById(id)) return;
         const style = document.createElement('style');
-        style.setAttribute("id", id);
+        style.id = id;
         style.textContent = styleText;
         (document.head || document.documentElement).appendChild(style);
     }
-
+    
     // Initialize theatre mode CSS immediately
     addStyle(theatreCSS, "youtube-theatre-enhancement");
-
-    // Setup auto-hide top bar
+    
+    // Cleanup auto-hide elements
+    function cleanupAutoHide() {
+        const wrapper = document.querySelector("#yt-masthead-wrapper");
+        const trigger = document.querySelector("#yt-autohide-trigger");
+        
+        if (wrapper) {
+            const masthead = wrapper.querySelector("#masthead-container");
+            if (masthead && wrapper.parentNode) {
+                wrapper.parentNode.insertBefore(masthead, wrapper);
+            }
+            wrapper.remove();
+        }
+        if (trigger) {
+            trigger.remove();
+        }
+    }
+    
+    // Setup auto-hide top bar (only on watch pages)
     function setupAutoHide() {
-        // Don't autohide on shorts etc.
-        if (!window.location.pathname.startsWith('/watch')) {
+        const isWatchPage = window.location.pathname.startsWith('/watch');
+        
+        // Clean up if not on watch page
+        if (!isWatchPage) {
+            cleanupAutoHide();
             return;
         }
-
+        
+        // Check if already setup
+        if (document.querySelector("#yt-masthead-wrapper")) return;
+        
+        // Wait for masthead to be available
         const masthead = document.querySelector("#masthead-container");
         if (!masthead) {
             requestAnimationFrame(setupAutoHide);
             return;
         }
-        if (document.querySelector("#yt-masthead-wrapper")) return;
-
+        
         // Inject top bar CSS
         addStyle(topBarCSS, "youtube-autohide-topbar");
-
+        
+        // Create elements
         const trigger = document.createElement("div");
         trigger.id = "yt-autohide-trigger";
         const wrapper = document.createElement("div");
         wrapper.id = "yt-masthead-wrapper";
-
-        // Insert trigger before masthead
+        
+        // Insert and rearrange DOM
         masthead.parentNode.insertBefore(trigger, masthead);
-        // Move masthead inside wrapper
         wrapper.appendChild(masthead);
-        // Insert wrapper after trigger
         trigger.after(wrapper);
-
-        // Maintain visibility while hovering masthead
-        wrapper.addEventListener("mouseenter", () => {
-            wrapper.classList.add("visible");
-        });
-        wrapper.addEventListener("mouseleave", () => {
-            wrapper.classList.remove("visible");
-        });
+        
+        // Maintain visibility while hovering
+        wrapper.addEventListener("mouseenter", () => wrapper.classList.add("visible"));
+        wrapper.addEventListener("mouseleave", () => wrapper.classList.remove("visible"));
     }
-
-    // Listen for URL changes
+    
+    // Watch for URL changes (YouTube SPA navigation)
     let lastUrl = location.href;
-    new MutationObserver(() => {
+    const urlObserver = new MutationObserver(() => {
         const url = location.href;
         if (url !== lastUrl) {
             lastUrl = url;
             setupAutoHide();
         }
-    }).observe(document, {subtree: true, childList: true});
-
-    // Ensure theatre CSS persists since youtube is a single page app
-    setInterval(() => {
+    });
+    urlObserver.observe(document.documentElement, {
+        subtree: true,
+        childList: true
+    });
+    
+    // Ensure theatre CSS persists (YouTube may remove it)
+    const styleChecker = setInterval(() => {
         addStyle(theatreCSS, "youtube-theatre-enhancement");
     }, 1000);
-
-    // Start setup when DOM is ready
+    
+    // Initial setup
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', setupAutoHide);
     } else {
